@@ -2,7 +2,7 @@ CFLAGS=-O3 -W -Wall -Wpedantic -Wextra
 CC=clang++
 HT=/home/gannimo/repos/Typesafety-IPC/LLVM/build/bin
 
-all: base safe downcasts
+all: base downcasts
 
 base: typeconfusion.cc
 	$(CC) $(CFLAGS) typeconfusion.cc -o typeconfusion
